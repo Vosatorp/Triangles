@@ -122,7 +122,7 @@ def get_OCR(reader, img_new, max_val, K):
 
     custom_config = r'--oem 3 --psm 10 -c tessedit_char_whitelist=12345678'
     text_pt = pytesseract.image_to_string(img_crop, config=custom_config).strip()
-    if text_pt:
+    if text_pt and len(text_pt) == 1:
         best_num_pt = int(text_pt)
         if not (1 <= best_num_pt <= 8):
             best_num_pt = None
