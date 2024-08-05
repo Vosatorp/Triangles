@@ -56,19 +56,6 @@ def score_triangle(p1, p2, p3):
     return max(angle1, angle2, angle3)
 
 
-def triangle_iou(triangle1, triangle2):
-    poly1 = Polygon(triangle1)
-    poly2 = Polygon(triangle2)
-
-    if not poly1.is_valid or not poly2.is_valid:
-        return 0.0
-
-    intersection = poly1.intersection(poly2).area
-    union = poly1.union(poly2).area
-    iou = intersection / union
-    return iou
-
-
 def get_triangle(mask):
     points = mask[0].xy[0]
 
@@ -159,13 +146,55 @@ def get_OCR(reader, img_new, max_val, K):
     return best_num, best_num_pt
 
 
-def parse_img(res_img, dir, imshow, ground_truth):
+def calculate_iou(triangle1, triangle2):
+    poly1 = Polygon(triangle1)
+    poly2 = Polygon(triangle2)
+
+    if not poly1.is_valid or not poly2.is_valid:
+        return 0.0
+
+    intersection = poly1.intersection(poly2).area
+    union = poly1.union(poly2).area
+    iou = intersection / union
+    return iou
+
+
+def calculate_metrics(predicted, ground_truth):
+    if not predicted or not ground_truth:
+        return 0, 0, 0
+
+    matched_predictions = set()
+    matched_ground_truth = set()
+
+    for i, (pred, pred_coord) in enumerate(predicted):
+        for j, (gt_num, gt_coord) in enumerate(ground_truth):
+            iou = calculate_iou(
+                [(pred_coord[k], pred_coord[k+1]) for k in range(0, 6, 2)],
+                [(gt_coord[k], gt_coord[k+1]) for k in range(0, 6, 2)]
+            )
+            if iou > 0.8 and pred == gt_num:
+                matched_predictions.add(i)
+                matched_ground_truth.add(j)
+                break
+
+    tp = len(matched_predictions)
+    fp = len(predicted) - tp
+    fn = len(ground_truth) - len(matched_ground_truth)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    return precision, recall, f1_score
+
+
+def parse_img(res_img, dir, imshow, gt_coordinates=None, gt_numbers=None):
     reader = easyocr.Reader(['en'])
 
     annotated_img = res_img.orig_img.copy()
     os.makedirs(f"./{dir}", exist_ok=True)
     result = []
-    coordinates = []
+    predictions = []
 
     for object in res_img:
         mask = object.masks
@@ -211,8 +240,9 @@ def parse_img(res_img, dir, imshow, ground_truth):
         if best_num:
             cv2.putText(annotated_img, str(best_num), tuple(centroid), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             result.append(int(best_num))
-
-        coordinates.append((tuple(p1), tuple(p2), tuple(p3), int(best_num) if best_num is not None else None))
+            predictions.append((best_num, [p1[0], p1[1], p2[0], p2[1], p3[0], p3[1]]))
+        else:
+            predictions.append((None, [p1[0], p1[1], p2[0], p2[1], p3[0], p3[1]]))
 
         for polygon in mask.xy:
             polygon = np.array(polygon, dtype=np.int32)
@@ -233,17 +263,25 @@ def parse_img(res_img, dir, imshow, ground_truth):
 
     print("Dice count: ", len(result))
     print("Result:", result)
-    for coord in coordinates:
-        print(f"Triangle: {coord[:3]}, Number: {coord[3]}")
+    for pred, coord in predictions:
+        print(f"Triangle: {pred}, {coord}")
 
     with open(f"./{dir}/result.txt", "w") as f:
         f.write(f"Dice count: {len(result)}\n")
-        for coord in coordinates:
-            f.write(f"Triangle: {coord[:3]}, Number: {coord[3]}\n")
+        f.write(" ".join(map(str, result)))
+        f.write("\nPredictions (number, coordinates):\n")
+        for pred, coord in predictions:
+            f.write(f"{pred}, {coord}\n")
 
-    if ground_truth:
-        calc_f1()
-
+    if gt_coordinates and gt_numbers:
+        precision, recall, f1_score = calculate_metrics(predictions, list(zip(gt_numbers, gt_coordinates)))
+        print(f"Precision: {precision:.4f}")
+        print(f"Recall: {recall:.4f}")
+        print(f"F1 Score: {f1_score:.4f}")
+        with open(f"./{dir}/result.txt", "a") as f:
+            f.write(f"\nPrecision: {precision:.4f}\n")
+            f.write(f"Recall: {recall:.4f}\n")
+            f.write(f"F1 Score: {f1_score:.4f}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Run YOLO model on a list of photos.")
@@ -258,8 +296,16 @@ def main():
     model = YOLO(args.checkpoint).to(args.device)
     results = model(args.photos)
 
+    gt_coordinates = None
+    gt_numbers = None
+    if args.ground_truth:
+        with open(args.ground_truth, 'r') as f:
+            lines = f.readlines()
+            gt_coordinates = [list(map(float, line.strip().split(',')[1:])) for line in lines]
+            gt_numbers = [int(line.strip().split(',')[0]) for line in lines]
+
     for res_img, folder in zip(results, args.test_dir):
-        parse_img(res_img, folder, args.imshow, args.ground_truth)
+        parse_img(res_img, folder, args.imshow, gt_coordinates, gt_numbers)
 
 
 if __name__ == "__main__":
