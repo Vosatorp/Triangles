@@ -12,6 +12,12 @@ import os
 import argparse
 from collections import Counter
 
+import warnings
+
+warnings.filterwarnings("ignore")
+
+from shapely.geometry import Polygon
+
 
 TRANSFORMED_SIZE = 100
 PADDING = 0
@@ -48,6 +54,19 @@ def score_triangle(p1, p2, p3):
         return 10 ** 10
 
     return max(angle1, angle2, angle3)
+
+
+def triangle_iou(triangle1, triangle2):
+    poly1 = Polygon(triangle1)
+    poly2 = Polygon(triangle2)
+
+    if not poly1.is_valid or not poly2.is_valid:
+        return 0.0
+
+    intersection = poly1.intersection(poly2).area
+    union = poly1.union(poly2).area
+    iou = intersection / union
+    return iou
 
 
 def get_triangle(mask):
@@ -140,12 +159,13 @@ def get_OCR(reader, img_new, max_val, K):
     return best_num, best_num_pt
 
 
-def parse_img(res_img, dir, imshow):
+def parse_img(res_img, dir, imshow, ground_truth):
     reader = easyocr.Reader(['en'])
 
     annotated_img = res_img.orig_img.copy()
     os.makedirs(f"./{dir}", exist_ok=True)
     result = []
+    coordinates = []
 
     for object in res_img:
         mask = object.masks
@@ -153,7 +173,7 @@ def parse_img(res_img, dir, imshow):
         img = cv2.cvtColor(res_img.orig_img, cv2.COLOR_BGR2GRAY)
 
         p1, p2, p3 = get_triangle(mask)
-        print("p:", p1, p2, p3)
+        print("Triangle:", p1, p2, p3)
 
         print("Score: ", score_triangle(p1, p2, p3))
 
@@ -166,7 +186,7 @@ def parse_img(res_img, dir, imshow):
         resulting_imgs = []
         num_counter = Counter()
 
-        if score_triangle(p1, p2, p3) < 80:
+        if score_triangle(p1, p2, p3) < 80:  # Проверка на то что треугольник более-менее равносторонний
             for K in [50, 70, 90, 60, 80, 100]:
                 for affine in get_affines(p1, p2, p3):
                     img_new = cv2.warpAffine(img, affine, (100, 100), borderValue=avg)
@@ -182,7 +202,7 @@ def parse_img(res_img, dir, imshow):
                 if K == 100 and len(num_counter) == 1:
                     break
 
-        print(num_counter)
+        print("COUNTER:", num_counter)
         best_num = num_counter.most_common(1)[0][0] if num_counter else None
 
         cv2.polylines(annotated_img, [np.array([p1, p2, p3], np.int32)], True, (0, 255, 0), 2)
@@ -191,6 +211,8 @@ def parse_img(res_img, dir, imshow):
         if best_num:
             cv2.putText(annotated_img, str(best_num), tuple(centroid), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             result.append(int(best_num))
+
+        coordinates.append((tuple(p1), tuple(p2), tuple(p3), int(best_num) if best_num is not None else None))
 
         for polygon in mask.xy:
             polygon = np.array(polygon, dtype=np.int32)
@@ -209,8 +231,18 @@ def parse_img(res_img, dir, imshow):
 
     cv2.imwrite(f"./{dir}/annotated_image.png", annotated_img)
 
+    print("Dice count: ", len(result))
     print("Result:", result)
-    open(f"./{dir}/result.txt", "w").write(" ".join(map(str, result)))
+    for coord in coordinates:
+        print(f"Triangle: {coord[:3]}, Number: {coord[3]}")
+
+    with open(f"./{dir}/result.txt", "w") as f:
+        f.write(f"Dice count: {len(result)}\n")
+        for coord in coordinates:
+            f.write(f"Triangle: {coord[:3]}, Number: {coord[3]}\n")
+
+    if ground_truth:
+        calc_f1()
 
 
 def main():
@@ -219,13 +251,15 @@ def main():
     parser.add_argument('--photos', type=str, nargs='+', required=True, help='List of photo paths to process')
     parser.add_argument('--test_dir', type=str, nargs='+', required=True)
     parser.add_argument('--imshow', action='store_true')
+    parser.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
+    parser.add_argument('--ground_truth', type=str, help='Path to the ground truth file for F1 score calculation')
     args = parser.parse_args()
 
-    model = YOLO(args.checkpoint)
+    model = YOLO(args.checkpoint).to(args.device)
     results = model(args.photos)
 
     for res_img, folder in zip(results, args.test_dir):
-        parse_img(res_img, folder, args.imshow)
+        parse_img(res_img, folder, args.imshow, args.ground_truth)
 
 
 if __name__ == "__main__":
